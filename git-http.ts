@@ -157,7 +157,9 @@ function parseFetchV0(packets: readonly Pkt[]): FetchRequest {
 /** Sideband packets (band 1) for a pack, chunked to the pkt-line limit. */
 function sidebandPackets(pack: Buffer): Buffer[] {
   const out: Buffer[] = [];
-  const CHUNK = 65519; // one band byte + data fits in a 65520-byte pkt-line
+  // A pkt-line is at most 65520 bytes including its 4-byte length header,
+  // and a sideband packet spends one payload byte on the band: data ≤ 65515.
+  const CHUNK = 65515;
   for (let i = 0; i < pack.length; i += CHUNK) {
     const chunk = pack.subarray(i, Math.min(pack.length, i + CHUNK));
     out.push(pktLine(Buffer.concat([Buffer.from([1]), chunk])));
@@ -445,7 +447,7 @@ export function handleReceivePack(repo: Repo, body: Buffer): { status: number; c
     let response: Buffer;
     if (sideband) {
       const chunks: Buffer[] = [];
-      const CHUNK = 65519;
+      const CHUNK = 65515; // 4-byte header + 1 band byte + data ≤ 65520
       for (let i = 0; i < inner.length; i += CHUNK) {
         chunks.push(pktLine(Buffer.concat([Buffer.from([1]), inner.subarray(i, Math.min(inner.length, i + CHUNK))])));
       }
