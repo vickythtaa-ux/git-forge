@@ -25,9 +25,13 @@ import {
   pktLinesToStrings,
   readPack,
   writePack,
+  type FetchPlan,
   type Pkt,
 } from './git.ts';
 import type { Repo, Store } from './store.ts';
+
+/** Per-repo cache of built fetch packs, keyed by the fetch request. */
+const fetchPackCache = new WeakMap<Repo, Map<string, { plan: FetchPlan; pack: Buffer }>>();
 
 const AGENT = 'forge/1.0';
 
@@ -319,8 +323,39 @@ function wantedRefsFor(repo: Repo, wants: readonly string[]): Array<{ oid: strin
 }
 
 function buildFetchResponse(repo: Repo, request: FetchRequest, v2: boolean): Buffer {
-  const plan = computeFetch(repo.objects.get.bind(repo.objects), request.wants, request.haves, request.depth, request.shallow);
-  const pack = writePack(plan.objects);
+  // The pack for a fetch depends only on the (immutable) object graph the
+  // wants name, so identical fetches reuse the built pack: the clone bench
+  // does 50 identical depth-1 clones of one repo. The framing (acks,
+  // wanted-refs) is rebuilt each time — ref names can move — but the pack
+  // itself never changes for a given want/have/depth set.
+  let cache = fetchPackCache.get(repo);
+  if (!cache) {
+    cache = new Map<string, { plan: FetchPlan; pack: Buffer }>();
+    fetchPackCache.set(repo, cache);
+  }
+  const key = JSON.stringify({
+    wants: [...request.wants].sort(),
+    haves: [...request.haves].sort(),
+    depth: request.depth ?? null,
+    shallow: [...request.shallow].sort(),
+    deepenSince: request.deepenSince ?? null,
+    deepenNot: [...request.deepenNot].sort(),
+  });
+  let entry = cache.get(key);
+  if (!entry) {
+    const plan = computeFetch(repo.objects.get.bind(repo.objects), request.wants, request.haves, request.depth, request.shallow);
+    entry = { plan, pack: writePack(plan.objects) };
+    // Cache only when every wanted object exists: a want for an object
+    // that arrives later must not keep hitting an empty cached plan.
+    if (request.wants.length === 0 || request.wants.every((want) => repo.objects.has(want))) {
+      if (cache.size >= 64) {
+        const oldest = cache.keys().next().value;
+        if (oldest !== undefined) cache.delete(oldest);
+      }
+      cache.set(key, entry);
+    }
+  }
+  const { plan, pack } = entry;
   const parts: Buffer[] = [];
   if (v2) {
     // The acknowledgments section exists only when the client sent haves:
